@@ -6,7 +6,10 @@ const session = require('express-session');
 const express = require('express');
 const app = express();
 app.use(cors({
-  origin: ['https://your-frontend.vercel.app', 'http://localhost:3000'],
+  origin: [
+    'https://lonehearts-mbti-front.vercel.app',
+    'http://localhost:3000'
+  ],
   credentials: true
 }));
 app.use(express.json());
