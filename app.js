@@ -13,11 +13,19 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json());
+
+const isProduction = process.env.NODE_ENV === 'production';
+
 app.use(session({
   secret: process.env.SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
-  cookie: { maxAge: 1000 * 60 * 60 } // 1시간
+  cookie: {
+    maxAge: 1000 * 60 * 60,
+    httpOnly: true,
+    sameSite: isProduction ? 'none' : 'lax',
+    secure: isProduction // 배포(https)에서는 true, 개발(http)에서는 false
+  }
 }));
 
 // MySQL 연결 설정
@@ -50,11 +58,52 @@ app.get('/api/questions', (req, res) => {
   });
 });
 
-// 기존 결과 제출 API
-app.post('/api/mbti/submit', (req, res) => {
+// answers: [{questionId: 1, value: 5}, ...] (총 60개, 1~60번)
+async function getClosestKmbtiCode(answers, db) {
+  // 1. A~J 그룹별 평균 구하기
+  const groupKeys = ['A','B','C','D','E','F','G','H','I','J'];
+  const groupAverages = {};
+  for (let i = 0; i < 10; i++) {
+    // 각 그룹별 6개 문항의 값 추출
+    const groupAnswers = answers
+      .filter(a => a.questionId > i*6 && a.questionId <= (i+1)*6)
+      .map(a => a.value);
+    // 평균 계산
+    groupAverages[groupKeys[i]] = groupAnswers.reduce((sum, v) => sum + v, 0) / groupAnswers.length;
+  }
+
+  // 2. DB에서 모든 kmbti_score_distribution 데이터 가져오기
+  const [rows] = await db.promise().query('SELECT * FROM kmbti_score_distribution');
+
+  // 3. 각 유형별로 맨해튼 거리 계산
+  let minDistance = Infinity;
+  let bestKmbtiCode = null;
+  for (const row of rows) {
+    let distance = 0;
+    for (const key of groupKeys) {
+      distance += Math.abs(groupAverages[key] - Number(row[`score_${key}`]));
+    }
+    if (distance < minDistance) {
+      minDistance = distance;
+      bestKmbtiCode = row.kmbti_code;
+    }
+  }
+  return bestKmbtiCode;
+}
+
+// 결과 제출 API
+app.post('/api/kmbti/submit', async (req, res) => {
   const answers = req.body.answers;
   const gender = req.body.gender;
-  res.json({ mbtiType: 'ESFP-T' });
+  
+  const typeCode = await getClosestKmbtiCode(answers, db);
+  db.query('SELECT * FROM kmbti_results WHERE type_code = ?', [typeCode], (err, rows) => {
+    if (err) return res.status(500).json({ error: 'DB 오류' });
+    if (rows.length === 0) {
+      return res.status(404).json({ error: '결과를 찾을 수 없습니다.' });
+    }
+    res.json(rows[0]);
+  });
 });
 
 // 회원가입 API
@@ -103,8 +152,9 @@ app.post('/api/login', (req, res) => {
       return res.status(401).json({ error: '이메일 또는 비밀번호가 올바르지 않습니다.' });
     }
     // 로그인 성공: 세션 등록
-    req.session.user = { id: user.id, username: user.username, email: user.email };
-    res.json({ success: true, username: user.username, email: user.email });
+    const isAdmin = user.email === process.env.ADMIN_EMAIL;
+    req.session.user = { id: user.id, username: user.username, email: user.email, isAdmin };
+    res.json({ success: true, username: user.username, email: user.email, isAdmin });
   });
 });
 
@@ -140,10 +190,10 @@ app.get('/api/check-username', (req, res) => {
   });
 });
 
-// MBTI 결과 조회 API
-app.get('/api/results/:typeCode', (req, res) => {
+// KMBTI 결과 조회 API
+app.get('/api/kmbti-results/:typeCode', (req, res) => {
   const { typeCode } = req.params;
-  db.query('SELECT * FROM mbti_results WHERE type_code = ?', [typeCode], (err, rows) => {
+  db.query('SELECT * FROM kmbti_results WHERE type_code = ?', [typeCode], (err, rows) => {
     if (err) return res.status(500).json({ error: 'DB 오류' });
     if (rows.length === 0) {
       return res.status(404).json({ error: '결과를 찾을 수 없습니다.' });
@@ -159,7 +209,31 @@ app.get('/api/results/:typeCode', (req, res) => {
   });
 });
 
-const PORT = process.env.PORT || 5001;
+// 문항 수정(관리자) API
+app.post('/api/admin/update-questions', (req, res) => {
+  // 관리자 세션 체크
+  if (!req.session.user || !req.session.user.isAdmin || req.session.user.email !== process.env.ADMIN_EMAIL) {
+    return res.status(403).json({ error: '관리자만 접근할 수 있습니다.' });
+  }
+  const questions = req.body.questions; // [{id, text}, ...]
+  if (!Array.isArray(questions)) {
+    return res.status(400).json({ error: '잘못된 요청입니다.' });
+  }
+  // 여러 문항을 한 번에 업데이트
+  const updates = questions.map(q =>
+    new Promise((resolve, reject) => {
+      db.query('UPDATE questions SET text = ? WHERE id = ?', [q.text, q.id], (err, result) => {
+        if (err) reject(err);
+        else resolve(result);
+      });
+    })
+  );
+  Promise.all(updates)
+    .then(() => res.json({ success: true }))
+    .catch(() => res.status(500).json({ error: 'DB 업데이트 오류' }));
+});
+
+const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`백엔드 서버가 ${PORT}번 포트에서 실행 중입니다.`);
 });
