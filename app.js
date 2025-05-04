@@ -209,12 +209,15 @@ app.get('/api/kmbti-results/:typeCode', (req, res) => {
   });
 });
 
-// 문항 수정(관리자) API
-app.post('/api/admin/update-questions', (req, res) => {
-  // 관리자 세션 체크
+function adminOnly(req, res, next) {
   if (!req.session.user || !req.session.user.isAdmin || req.session.user.email !== process.env.ADMIN_EMAIL) {
     return res.status(403).json({ error: '관리자만 접근할 수 있습니다.' });
   }
+  next();
+}
+
+// 문항 수정(관리자) API
+app.post('/api/admin/update-questions', adminOnly, (req, res) => {
   const questions = req.body.questions; // [{id, text}, ...]
   if (!Array.isArray(questions)) {
     return res.status(400).json({ error: '잘못된 요청입니다.' });
@@ -231,6 +234,136 @@ app.post('/api/admin/update-questions', (req, res) => {
   Promise.all(updates)
     .then(() => res.json({ success: true }))
     .catch(() => res.status(500).json({ error: 'DB 업데이트 오류' }));
+});
+
+// KMBTI 점수분포(CRUD) API
+// 전체 조회
+app.get('/api/admin/kmbti-score-distributions', adminOnly, (req, res) => {
+  db.query('SELECT * FROM kmbti_score_distribution ORDER BY kmbti_type_name ASC', (err, rows) => {
+    if (err) return res.status(500).json({ error: 'DB 오류' });
+    res.json(rows);
+  });
+});
+// 단일 조회
+app.get('/api/admin/kmbti-score-distributions/:id', adminOnly, (req, res) => {
+  const { id } = req.params;
+  db.query('SELECT * FROM kmbti_score_distribution WHERE kmbti_type_name = ?', [id], (err, rows) => {
+    if (err) return res.status(500).json({ error: 'DB 오류' });
+    if (rows.length === 0) return res.status(404).json({ error: '해당 유형 없음' });
+    res.json(rows[0]);
+  });
+});
+// 생성
+app.post('/api/admin/kmbti-score-distributions', adminOnly, (req, res) => {
+  const { kmbti_type_name, kmbti_code, score_A, score_B, score_C, score_D, score_E, score_F, score_G, score_H, score_I, score_J } = req.body;
+  if (!kmbti_type_name || !kmbti_code) return res.status(400).json({ error: '필수값 누락' });
+  db.query(
+    'INSERT INTO kmbti_score_distribution (kmbti_type_name, kmbti_code, score_A, score_B, score_C, score_D, score_E, score_F, score_G, score_H, score_I, score_J) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [kmbti_type_name, kmbti_code, score_A, score_B, score_C, score_D, score_E, score_F, score_G, score_H, score_I, score_J],
+    (err, result) => {
+      if (err) return res.status(500).json({ error: 'DB 오류' });
+      // kmbti_results에도 자동 추가
+      const emptyResultJson = {
+        summary: "",
+        keywords: [],
+        traits: [
+          { name: "감정표현", type: "", percent: 0, desc: "" },
+          { name: "목표추진성", type: "", percent: 0, desc: "" },
+          { name: "사회적 에너지", type: "", percent: 0, desc: "" },
+          { name: "자기인식력", type: "", percent: 0, desc: "" }
+        ],
+        strengths: [],
+        watchouts: [],
+        relation_advice: { summary: "", guides: [] },
+        relation_style: { summary: "", styles: [] },
+        activity: { summary: "", activities: [] }
+      };
+      db.query(
+        'INSERT INTO kmbti_results (type_code, type_name, result_json) VALUES (?, ?, ?)',
+        [kmbti_code, kmbti_type_name, JSON.stringify(emptyResultJson)],
+        (err2) => {
+          if (err2) return res.status(500).json({ error: 'DB 오류(결과 자동생성)' });
+          res.json({ success: true, id: kmbti_type_name });
+        }
+      );
+    }
+  );
+});
+// 수정
+app.put('/api/admin/kmbti-score-distributions/:id', adminOnly, (req, res) => {
+  const { id } = req.params;
+  const { kmbti_code, score_A, score_B, score_C, score_D, score_E, score_F, score_G, score_H, score_I, score_J } = req.body;
+  db.query(
+    'UPDATE kmbti_score_distribution SET kmbti_code=?, score_A=?, score_B=?, score_C=?, score_D=?, score_E=?, score_F=?, score_G=?, score_H=?, score_I=?, score_J=? WHERE kmbti_type_name=?',
+    [kmbti_code, score_A, score_B, score_C, score_D, score_E, score_F, score_G, score_H, score_I, score_J, id],
+    (err, result) => {
+      if (err) return res.status(500).json({ error: 'DB 오류' });
+      res.json({ success: true });
+    }
+  );
+});
+// 삭제
+app.delete('/api/admin/kmbti-score-distributions/:id', adminOnly, (req, res) => {
+  const { id } = req.params;
+  // 먼저 kmbti_score_distribution에서 삭제
+  db.query('DELETE FROM kmbti_score_distribution WHERE kmbti_type_name = ?', [id], (err, result) => {
+    if (err) return res.status(500).json({ error: 'DB 오류' });
+    // kmbti_results에서도 type_name 또는 type_code로 삭제
+    db.query('DELETE FROM kmbti_results WHERE type_name = ? OR type_code = (SELECT kmbti_code FROM kmbti_score_distribution WHERE kmbti_type_name = ?)', [id, id], (err2) => {
+      if (err2) return res.status(500).json({ error: 'kmbti_results 삭제 오류' });
+      res.json({ success: true });
+    });
+  });
+});
+
+// KMBTI 결과 전체 목록 조회
+app.get('/api/admin/kmbti-results', adminOnly, (req, res) => {
+  db.query('SELECT * FROM kmbti_results ORDER BY id ASC', (err, rows) => {
+    if (err) return res.status(500).json({ error: 'DB 오류' });
+    res.json(rows);
+  });
+});
+
+// KMBTI 결과 생성
+app.post('/api/admin/kmbti-results', adminOnly, (req, res) => {
+  const { type_code, type_name, result_json } = req.body;
+  if (!type_code || !type_name || !result_json) {
+    return res.status(400).json({ error: '필수값 누락' });
+  }
+  db.query(
+    'INSERT INTO kmbti_results (type_code, type_name, result_json) VALUES (?, ?, ?)',
+    [type_code, type_name, JSON.stringify(result_json)],
+    (err, result) => {
+      if (err) return res.status(500).json({ error: 'DB 오류' });
+      res.json({ success: true, id: result.insertId });
+    }
+  );
+});
+
+// KMBTI 결과 수정
+app.put('/api/admin/kmbti-results/:typeCode', adminOnly, (req, res) => {
+  const { typeCode } = req.params;
+  const { type_name, result_json } = req.body;
+  if (!type_name || !result_json) {
+    return res.status(400).json({ error: '필수값 누락' });
+  }
+  db.query(
+    'UPDATE kmbti_results SET type_name = ?, result_json = ? WHERE type_code = ?',
+    [type_name, JSON.stringify(result_json), typeCode],
+    (err, result) => {
+      if (err) return res.status(500).json({ error: 'DB 오류' });
+      res.json({ success: true });
+    }
+  );
+});
+
+// KMBTI 결과 삭제
+app.delete('/api/admin/kmbti-results/:typeCode', adminOnly, (req, res) => {
+  const { typeCode } = req.params;
+  db.query('DELETE FROM kmbti_results WHERE type_code = ?', [typeCode], (err, result) => {
+    if (err) return res.status(500).json({ error: 'DB 오류' });
+    res.json({ success: true });
+  });
 });
 
 const PORT = process.env.PORT || 5000;
