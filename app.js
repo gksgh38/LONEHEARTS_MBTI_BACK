@@ -160,6 +160,7 @@ app.post('/api/login', (req, res) => {
 
 // 세션 정보 확인 API
 app.get('/api/session', (req, res) => {
+  console.log('SESSION CHECK req.session.user:', req.session.user);
   if (req.session.user) {
     res.json({ loggedIn: true, user: req.session.user });
   } else {
@@ -369,4 +370,5 @@ app.delete('/api/admin/kmbti-results/:typeCode', adminOnly, (req, res) => {
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`백엔드 서버가 ${PORT}번 포트에서 실행 중입니다.`);
+  console.log('NODE_ENV:', process.env.NODE_ENV);
 });
