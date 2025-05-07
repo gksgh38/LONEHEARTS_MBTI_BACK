@@ -6,6 +6,7 @@ const session = require('express-session');
 const MySQLStore = require('express-mysql-session')(session);
 const express = require('express');
 const app = express();
+app.set('trust proxy', 1);
 app.use(cors({
   origin: [
     'https://lonehearts-mbti-front.vercel.app',
