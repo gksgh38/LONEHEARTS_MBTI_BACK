@@ -3,6 +3,7 @@ const cors = require('cors');
 const mysql = require('mysql2');
 const bcrypt = require('bcrypt');
 const session = require('express-session');
+const MySQLStore = require('express-mysql-session')(session);
 const express = require('express');
 const app = express();
 app.use(cors({
@@ -16,8 +17,19 @@ app.use(express.json());
 
 const isProduction = process.env.NODE_ENV === 'production';
 
+const sessionStore = new MySQLStore({
+  host: process.env.DB_HOST,
+  port: 3306,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  // 기타 옵션 (optional)
+});
+
 app.use(session({
+  key: 'connect.sid',
   secret: process.env.SESSION_SECRET,
+  store: sessionStore, // 세션 저장소로 MySQL 사용
   resave: false,
   saveUninitialized: false,
   cookie: {
