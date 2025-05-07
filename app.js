@@ -163,9 +163,12 @@ app.post('/api/login', async (req, res) => {
     if (!match) {
       return res.status(401).json({ error: '이메일 또는 비밀번호가 올바르지 않습니다.' });
     }
-    const isAdmin = user.email === process.env.ADMIN_EMAIL;
+    const isAdmin = user.email === process.env.ADMIN_EMAIL;    
     req.session.user = { id: user.id, username: user.username, email: user.email, isAdmin };
-    return res.json({ success: true, username: user.username, email: user.email, isAdmin });
+    req.session.save(err => {
+      if (err) return res.status(500).json({ error: '세션 저장 오류' });
+      return res.json({ success: true, username: user.username, email: user.email, isAdmin });
+    });
   } catch (err) {
     return res.status(500).json({ error: 'DB 오류' });
   }
