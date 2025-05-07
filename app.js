@@ -148,13 +148,13 @@ app.post('/api/register', async (req, res) => {
 });
 
 // 로그인 API
-app.post('/api/login', (req, res) => {
+app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
     return res.status(400).json({ error: '이메일과 비밀번호를 입력하세요.' });
   }
-  db.query('SELECT * FROM users WHERE email = ?', [email], async (err, rows) => {
-    if (err) return res.status(500).json({ error: 'DB 오류' });
+  try {
+    const [rows] = await db.promise().query('SELECT * FROM users WHERE email = ?', [email]);
     if (rows.length === 0) {
       return res.status(401).json({ error: '이메일 또는 비밀번호가 올바르지 않습니다.' });
     }
@@ -163,11 +163,12 @@ app.post('/api/login', (req, res) => {
     if (!match) {
       return res.status(401).json({ error: '이메일 또는 비밀번호가 올바르지 않습니다.' });
     }
-    // 로그인 성공: 세션 등록
     const isAdmin = user.email === process.env.ADMIN_EMAIL;
     req.session.user = { id: user.id, username: user.username, email: user.email, isAdmin };
-    res.json({ success: true, username: user.username, email: user.email, isAdmin });
-  });
+    return res.json({ success: true, username: user.username, email: user.email, isAdmin });
+  } catch (err) {
+    return res.status(500).json({ error: 'DB 오류' });
+  }
 });
 
 // 세션 정보 확인 API
