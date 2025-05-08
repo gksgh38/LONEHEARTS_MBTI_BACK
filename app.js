@@ -59,10 +59,10 @@ app.get('/api/questions', (req, res) => {
   const offset = (page - 1) * limit;
 
   db.query('SELECT COUNT(*) as total FROM questions', (err, countResult) => {
-    if (err) return res.status(500).json({ error: 'DB 오류' });
+    if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
     const total = countResult[0].total;
-    db.query('SELECT id, text FROM questions ORDER BY id ASC LIMIT ? OFFSET ?', [limit, offset], (err, rows) => {
-      if (err) return res.status(500).json({ error: 'DB 오류' });
+    db.query('SELECT id, text, is_reverse FROM questions ORDER BY id ASC LIMIT ? OFFSET ?', [limit, offset], (err, rows) => {
+      if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
       res.json({
         questions: rows,
         total
@@ -73,14 +73,19 @@ app.get('/api/questions', (req, res) => {
 
 // answers: [{questionId: 1, value: 5}, ...] (총 60개, 1~60번)
 async function getClosestKmbtiCode(answers, db) {
-  // 1. A~J 그룹별 평균 구하기
+  // 0. 모든 문항의 is_reverse 정보 조회
+  const [questionRows] = await db.promise().query('SELECT id, is_reverse FROM questions ORDER BY id ASC');
+  const reverseMap = {};
+  questionRows.forEach(q => { reverseMap[q.id] = !!q.is_reverse; });
+
+  // 1. A~J 그룹별 평균 구하기 (역채점 적용)
   const groupKeys = ['A','B','C','D','E','F','G','H','I','J'];
   const groupAverages = {};
   for (let i = 0; i < 10; i++) {
-    // 각 그룹별 6개 문항의 값 추출
+    // 각 그룹별 6개 문항의 값 추출 (역채점 적용)
     const groupAnswers = answers
-      .filter(a => a.questionId > i*6 && a.questionId <= (i+1)*6)
-      .map(a => a.value);
+      .filter(a => a.questionId > i * 6 && a.questionId <= (i + 1) * 6)
+      .map(a => reverseMap[a.questionId] ? (6 - a.value) : a.value);
     // 평균 계산
     groupAverages[groupKeys[i]] = groupAnswers.reduce((sum, v) => sum + v, 0) / groupAnswers.length;
   }
@@ -88,13 +93,18 @@ async function getClosestKmbtiCode(answers, db) {
   // 2. DB에서 모든 kmbti_score_distribution 데이터 가져오기
   const [rows] = await db.promise().query('SELECT * FROM kmbti_score_distribution');
 
-  // 3. 각 유형별로 맨해튼 거리 계산
+  // 3. 각 유형별로 min/max 기반 거리 계산
   let minDistance = Infinity;
   let bestKmbtiCode = null;
   for (const row of rows) {
     let distance = 0;
     for (const key of groupKeys) {
-      distance += Math.abs(groupAverages[key] - Number(row[`score_${key}`]));
+      const min = Number(row[`score_${key}_min`]);
+      const max = Number(row[`score_${key}_max`]);
+      const avg = groupAverages[key];
+      if (avg < min) distance += (min - avg);
+      else if (avg > max) distance += (avg - max);
+      // 범위 내면 거리 0
     }
     if (distance < minDistance) {
       minDistance = distance;
@@ -111,7 +121,7 @@ app.post('/api/kmbti/submit', async (req, res) => {
   
   const typeCode = await getClosestKmbtiCode(answers, db);
   db.query('SELECT * FROM kmbti_results WHERE type_code = ?', [typeCode], (err, rows) => {
-    if (err) return res.status(500).json({ error: 'DB 오류' });
+    if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
     if (rows.length === 0) {
       return res.status(404).json({ error: '결과를 찾을 수 없습니다.' });
     }
@@ -128,7 +138,7 @@ app.post('/api/register', async (req, res) => {
   try {
     // 이메일 또는 username 중복 체크
     db.query('SELECT id FROM users WHERE email = ? OR username = ?', [email, username], async (err, rows) => {
-      if (err) return res.status(500).json({ error: 'DB 오류' });
+      if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
       if (rows.length > 0) {
         return res.status(409).json({ error: '이미 존재하는 이메일 또는 닉네임입니다.' });
       }
@@ -138,7 +148,7 @@ app.post('/api/register', async (req, res) => {
         'INSERT INTO users (username, email, password) VALUES (?, ?, ?)',
         [username, email, hash],
         (err, result) => {
-          if (err) return res.status(500).json({ error: 'DB 오류' });
+          if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
           res.json({ success: true });
         }
       );
@@ -171,13 +181,12 @@ app.post('/api/login', async (req, res) => {
       return res.json({ success: true, username: user.username, email: user.email, isAdmin });
     });
   } catch (err) {
-    return res.status(500).json({ error: 'DB 오류' });
+    return res.status(500).json({ error: 'DB 오류', detail: err.message });
   }
 });
 
 // 세션 정보 확인 API
-app.get('/api/session', (req, res) => {
-  console.log('SESSION CHECK req.session.user:', req.session.user);
+app.get('/api/session', (req, res) => {  
   if (req.session.user) {
     res.json({ loggedIn: true, user: req.session.user });
   } else {
@@ -199,7 +208,7 @@ app.get('/api/check-username', (req, res) => {
   const { username } = req.query;
   if (!username) return res.status(400).json({ error: '닉네임을 입력하세요.' });
   db.query('SELECT id FROM users WHERE username = ?', [username], (err, rows) => {
-    if (err) return res.status(500).json({ error: 'DB 오류' });
+    if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
     if (rows.length > 0) {
       return res.json({ exists: true });
     } else {
@@ -212,7 +221,7 @@ app.get('/api/check-username', (req, res) => {
 app.get('/api/kmbti-results/:typeCode', (req, res) => {
   const { typeCode } = req.params;
   db.query('SELECT * FROM kmbti_results WHERE type_code = ?', [typeCode], (err, rows) => {
-    if (err) return res.status(500).json({ error: 'DB 오류' });
+    if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
     if (rows.length === 0) {
       return res.status(404).json({ error: '결과를 찾을 수 없습니다.' });
     }
@@ -236,14 +245,14 @@ function adminOnly(req, res, next) {
 
 // 문항 수정(관리자) API
 app.post('/api/admin/update-questions', adminOnly, (req, res) => {
-  const questions = req.body.questions; // [{id, text}, ...]
+  const questions = req.body.questions; // [{id, text, is_reverse}, ...]
   if (!Array.isArray(questions)) {
     return res.status(400).json({ error: '잘못된 요청입니다.' });
   }
   // 여러 문항을 한 번에 업데이트
   const updates = questions.map(q =>
     new Promise((resolve, reject) => {
-      db.query('UPDATE questions SET text = ? WHERE id = ?', [q.text, q.id], (err, result) => {
+      db.query('UPDATE questions SET text = ?, is_reverse = ? WHERE id = ?', [q.text, !!q.is_reverse, q.id], (err, result) => {
         if (err) reject(err);
         else resolve(result);
       });
@@ -251,14 +260,14 @@ app.post('/api/admin/update-questions', adminOnly, (req, res) => {
   );
   Promise.all(updates)
     .then(() => res.json({ success: true }))
-    .catch(() => res.status(500).json({ error: 'DB 업데이트 오류' }));
+    .catch(() => res.status(500).json({ error: 'DB 업데이트 오류', detail: err.message }));
 });
 
 // KMBTI 점수분포(CRUD) API
 // 전체 조회
 app.get('/api/admin/kmbti-score-distributions', adminOnly, (req, res) => {
   db.query('SELECT * FROM kmbti_score_distribution ORDER BY kmbti_type_name ASC', (err, rows) => {
-    if (err) return res.status(500).json({ error: 'DB 오류' });
+    if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
     res.json(rows);
   });
 });
@@ -266,20 +275,30 @@ app.get('/api/admin/kmbti-score-distributions', adminOnly, (req, res) => {
 app.get('/api/admin/kmbti-score-distributions/:id', adminOnly, (req, res) => {
   const { id } = req.params;
   db.query('SELECT * FROM kmbti_score_distribution WHERE kmbti_type_name = ?', [id], (err, rows) => {
-    if (err) return res.status(500).json({ error: 'DB 오류' });
+    if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
     if (rows.length === 0) return res.status(404).json({ error: '해당 유형 없음' });
     res.json(rows[0]);
   });
 });
 // 생성
 app.post('/api/admin/kmbti-score-distributions', adminOnly, (req, res) => {
-  const { kmbti_type_name, kmbti_code, score_A, score_B, score_C, score_D, score_E, score_F, score_G, score_H, score_I, score_J } = req.body;
-  if (!kmbti_type_name || !kmbti_code) return res.status(400).json({ error: '필수값 누락' });
+  const {
+    kmbti_type_name, kmbti_code,
+    score_A_min, score_A_max, score_B_min, score_B_max, score_C_min, score_C_max, score_D_min, score_D_max, score_E_min, score_E_max,
+    score_F_min, score_F_max, score_G_min, score_G_max, score_H_min, score_H_max, score_I_min, score_I_max, score_J_min, score_J_max
+  } = req.body;
+  if (!kmbti_type_name || !kmbti_code) {
+    return res.status(400).json({ error: '필수값 누락' });
+  }
   db.query(
-    'INSERT INTO kmbti_score_distribution (kmbti_type_name, kmbti_code, score_A, score_B, score_C, score_D, score_E, score_F, score_G, score_H, score_I, score_J) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    [kmbti_type_name, kmbti_code, score_A, score_B, score_C, score_D, score_E, score_F, score_G, score_H, score_I, score_J],
+    "INSERT INTO kmbti_score_distribution (kmbti_type_name, kmbti_code, score_A_min, score_A_max, score_B_min, score_B_max, score_C_min, score_C_max, score_D_min, score_D_max, score_E_min, score_E_max, score_F_min, score_F_max, score_G_min, score_G_max, score_H_min, score_H_max, score_I_min, score_I_max, score_J_min, score_J_max) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    [
+      kmbti_type_name, kmbti_code,
+      score_A_min, score_A_max, score_B_min, score_B_max, score_C_min, score_C_max, score_D_min, score_D_max, score_E_min, score_E_max,
+      score_F_min, score_F_max, score_G_min, score_G_max, score_H_min, score_H_max, score_I_min, score_I_max, score_J_min, score_J_max
+    ],
     (err, result) => {
-      if (err) return res.status(500).json({ error: 'DB 오류' });
+      if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
       // kmbti_results에도 자동 추가
       const emptyResultJson = {
         summary: "",
@@ -300,7 +319,7 @@ app.post('/api/admin/kmbti-score-distributions', adminOnly, (req, res) => {
         'INSERT INTO kmbti_results (type_code, type_name, result_json) VALUES (?, ?, ?)',
         [kmbti_code, kmbti_type_name, JSON.stringify(emptyResultJson)],
         (err2) => {
-          if (err2) return res.status(500).json({ error: 'DB 오류(결과 자동생성)' });
+          if (err2) return res.status(500).json({ error: 'DB 오류(결과 자동생성)', detail: err2.message });
           res.json({ success: true, id: kmbti_type_name });
         }
       );
@@ -310,12 +329,21 @@ app.post('/api/admin/kmbti-score-distributions', adminOnly, (req, res) => {
 // 수정
 app.put('/api/admin/kmbti-score-distributions/:id', adminOnly, (req, res) => {
   const { id } = req.params;
-  const { kmbti_code, score_A, score_B, score_C, score_D, score_E, score_F, score_G, score_H, score_I, score_J } = req.body;
+  const {
+    kmbti_code,
+    score_A_min, score_A_max, score_B_min, score_B_max, score_C_min, score_C_max, score_D_min, score_D_max, score_E_min, score_E_max,
+    score_F_min, score_Fmax, score_G_min, score_G_max, score_H_min, score_H_max, score_I_min, score_I_max, score_J_min, score_J_max
+  } = req.body;
   db.query(
-    'UPDATE kmbti_score_distribution SET kmbti_code=?, score_A=?, score_B=?, score_C=?, score_D=?, score_E=?, score_F=?, score_G=?, score_H=?, score_I=?, score_J=? WHERE kmbti_type_name=?',
-    [kmbti_code, score_A, score_B, score_C, score_D, score_E, score_F, score_G, score_H, score_I, score_J, id],
+    `UPDATE kmbti_score_distribution SET kmbti_code=?, score_A_min=?, score_A_max=?, score_B_min=?, score_B_max=?, score_C_min=?, score_C_max=?, score_D_min=?, score_D_max=?, score_E_min=?, score_E_max=?, score_F_min=?, score_F_max=?, score_G_min=?, score_G_max=?, score_H_min=?, score_H_max=?, score_I_min=?, score_I_max=?, score_J_min=?, score_J_max=? WHERE kmbti_type_name=?`,
+    [
+      kmbti_code,
+      score_A_min, score_A_max, score_B_min, score_B_max, score_C_min, score_C_max, score_D_min, score_D_max, score_E_min, score_E_max,
+      score_F_min, score_F_max, score_G_min, score_G_max, score_H_min, score_H_max, score_I_min, score_I_max, score_J_min, score_J_max,
+      id
+    ],
     (err, result) => {
-      if (err) return res.status(500).json({ error: 'DB 오류' });
+      if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
       res.json({ success: true });
     }
   );
@@ -325,10 +353,10 @@ app.delete('/api/admin/kmbti-score-distributions/:id', adminOnly, (req, res) => 
   const { id } = req.params;
   // 먼저 kmbti_score_distribution에서 삭제
   db.query('DELETE FROM kmbti_score_distribution WHERE kmbti_type_name = ?', [id], (err, result) => {
-    if (err) return res.status(500).json({ error: 'DB 오류' });
+    if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
     // kmbti_results에서도 type_name 또는 type_code로 삭제
     db.query('DELETE FROM kmbti_results WHERE type_name = ? OR type_code = (SELECT kmbti_code FROM kmbti_score_distribution WHERE kmbti_type_name = ?)', [id, id], (err2) => {
-      if (err2) return res.status(500).json({ error: 'kmbti_results 삭제 오류' });
+      if (err2) return res.status(500).json({ error: 'kmbti_results 삭제 오류', detail: err2.message });
       res.json({ success: true });
     });
   });
@@ -337,7 +365,7 @@ app.delete('/api/admin/kmbti-score-distributions/:id', adminOnly, (req, res) => 
 // KMBTI 결과 전체 목록 조회
 app.get('/api/admin/kmbti-results', adminOnly, (req, res) => {
   db.query('SELECT * FROM kmbti_results ORDER BY id ASC', (err, rows) => {
-    if (err) return res.status(500).json({ error: 'DB 오류' });
+    if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
     res.json(rows);
   });
 });
@@ -352,7 +380,7 @@ app.post('/api/admin/kmbti-results', adminOnly, (req, res) => {
     'INSERT INTO kmbti_results (type_code, type_name, result_json) VALUES (?, ?, ?)',
     [type_code, type_name, JSON.stringify(result_json)],
     (err, result) => {
-      if (err) return res.status(500).json({ error: 'DB 오류' });
+      if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
       res.json({ success: true, id: result.insertId });
     }
   );
@@ -369,7 +397,7 @@ app.put('/api/admin/kmbti-results/:typeCode', adminOnly, (req, res) => {
     'UPDATE kmbti_results SET type_name = ?, result_json = ? WHERE type_code = ?',
     [type_name, JSON.stringify(result_json), typeCode],
     (err, result) => {
-      if (err) return res.status(500).json({ error: 'DB 오류' });
+      if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
       res.json({ success: true });
     }
   );
@@ -379,7 +407,7 @@ app.put('/api/admin/kmbti-results/:typeCode', adminOnly, (req, res) => {
 app.delete('/api/admin/kmbti-results/:typeCode', adminOnly, (req, res) => {
   const { typeCode } = req.params;
   db.query('DELETE FROM kmbti_results WHERE type_code = ?', [typeCode], (err, result) => {
-    if (err) return res.status(500).json({ error: 'DB 오류' });
+    if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
     res.json({ success: true });
   });
 });
