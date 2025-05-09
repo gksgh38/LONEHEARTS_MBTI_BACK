@@ -332,7 +332,7 @@ app.put('/api/admin/kmbti-score-distributions/:id', adminOnly, (req, res) => {
   const {
     kmbti_code,
     score_A_min, score_A_max, score_B_min, score_B_max, score_C_min, score_C_max, score_D_min, score_D_max, score_E_min, score_E_max,
-    score_F_min, score_Fmax, score_G_min, score_G_max, score_H_min, score_H_max, score_I_min, score_I_max, score_J_min, score_J_max
+    score_F_min, score_F_max, score_G_min, score_G_max, score_H_min, score_H_max, score_I_min, score_I_max, score_J_min, score_J_max
   } = req.body;
   db.query(
     `UPDATE kmbti_score_distribution SET kmbti_code=?, score_A_min=?, score_A_max=?, score_B_min=?, score_B_max=?, score_C_min=?, score_C_max=?, score_D_min=?, score_D_max=?, score_E_min=?, score_E_max=?, score_F_min=?, score_F_max=?, score_G_min=?, score_G_max=?, score_H_min=?, score_H_max=?, score_I_min=?, score_I_max=?, score_J_min=?, score_J_max=? WHERE kmbti_type_name=?`,
