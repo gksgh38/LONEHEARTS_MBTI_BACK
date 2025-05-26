@@ -362,6 +362,362 @@ app.delete('/api/admin/kmbti-score-distributions/:id', adminOnly, (req, res) => 
   });
 });
 
+// 인증 확인 미들웨어
+function authRequired(req, res, next) {
+  if (!req.session.user) {
+    return res.status(401).json({ error: '로그인이 필요합니다.' });
+  }
+  next();
+}
+
+// 커뮤니티 게시글 목록 조회 API (페이지네이션)
+app.get('/api/community/posts', (req, res) => {
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 30;
+  const offset = (page - 1) * limit;
+
+  // 총 게시글 수 조회
+  db.query('SELECT COUNT(*) as total FROM board_community', (err, countResult) => {
+    if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
+    
+    const total = countResult[0].total;
+    const totalPages = Math.ceil(total / limit);
+    
+    // 게시글 목록 조회 (작성자 정보 포함)
+    const query = `
+      SELECT b.id, b.title, b.content, b.created_at, b.updated_at, 
+             b.author_id, u.username as author_name
+      FROM board_community b
+      JOIN users u ON b.author_id = u.id
+      ORDER BY b.created_at DESC
+      LIMIT ? OFFSET ?
+    `;
+    
+    db.query(query, [limit, offset], (err, rows) => {
+      if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
+      
+      res.json({
+        posts: rows,
+        total,
+        totalPages,
+        currentPage: page,
+        hasMore: page < totalPages
+      });
+    });
+  });
+});
+
+// 커뮤니티 게시글 등록 API
+app.post('/api/community/posts', authRequired, (req, res) => {
+  const { title, content } = req.body;
+  const authorId = req.session.user.id;
+  
+  // 입력값 검증
+  if (!title || !content) {
+    return res.status(400).json({ error: '제목과 내용을 모두 입력해주세요.' });
+  }
+  
+  if (title.length > 255) {
+    return res.status(400).json({ error: '제목은 255자 이내로 작성해주세요.' });
+  }
+  
+  // 게시글 저장
+  const query = 'INSERT INTO board_community (author_id, title, content) VALUES (?, ?, ?)';
+  db.query(query, [authorId, title, content], (err, result) => {
+    if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
+    
+    // 생성된 게시글 ID와 함께 성공 응답
+    res.status(201).json({ 
+      success: true, 
+      postId: result.insertId,
+      message: '게시글이 등록되었습니다.'
+    });
+  });
+});
+
+// 게시물 수정 API
+app.put('/api/community/posts/:id', authRequired, (req, res) => {
+  const postId = parseInt(req.params.id);
+  const { title, content } = req.body;
+  const userId = req.session.user.id;
+  const isAdmin = req.session.user.isAdmin;
+  
+  // 입력값 검증
+  if (!title || !content) {
+    return res.status(400).json({ error: '제목과 내용을 모두 입력해주세요.' });
+  }
+  
+  if (title.length > 255) {
+    return res.status(400).json({ error: '제목은 255자 이내로 작성해주세요.' });
+  }
+  
+  // 게시물 존재 및 권한 확인
+  db.query('SELECT author_id FROM board_community WHERE id = ?', [postId], (err, rows) => {
+    if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
+    
+    if (rows.length === 0) {
+      return res.status(404).json({ error: '게시물을 찾을 수 없습니다.' });
+    }
+    
+    const authorId = rows[0].author_id;
+    
+    // 작성자 본인이거나 관리자만 수정 가능
+    if (authorId !== userId && !isAdmin) {
+      return res.status(403).json({ error: '이 게시물을 수정할 권한이 없습니다.' });
+    }
+    
+    // 게시물 수정
+    db.query(
+      'UPDATE board_community SET title = ?, content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [title, content, postId],
+      (updateErr, result) => {
+        if (updateErr) return res.status(500).json({ error: 'DB 오류', detail: updateErr.message });
+        
+        res.json({ 
+          success: true, 
+          message: '게시물이 수정되었습니다.'
+        });
+      }
+    );
+  });
+});
+
+// 커뮤니티 게시물 개수 조회 API
+app.get('/api/community/posts/count', (req, res) => {
+  db.query('SELECT COUNT(*) as total FROM board_community', (err, result) => {
+    if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
+    
+    const total = result[0].total;
+    res.json({ total });
+  });
+});
+
+// 커뮤니티 게시물 상세 조회 API
+app.get('/api/community/posts/:id', (req, res) => {
+  const postId = parseInt(req.params.id);
+  
+  if (isNaN(postId)) {
+    return res.status(400).json({ error: '유효하지 않은 게시물 ID입니다.' });
+  }
+  
+  // 게시물 정보와 작성자 정보를 함께 조회
+  const query = `
+    SELECT b.id, b.title, b.content, b.created_at, b.updated_at, 
+           b.author_id, u.username as author_name
+    FROM board_community b
+    JOIN users u ON b.author_id = u.id
+    WHERE b.id = ?
+  `;
+  
+  db.query(query, [postId], (err, rows) => {
+    if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
+    
+    if (rows.length === 0) {
+      return res.status(404).json({ error: '게시물을 찾을 수 없습니다.' });
+    }
+    
+    res.json(rows[0]);
+  });
+});
+
+// 게시물 삭제 API
+app.delete('/api/community/posts/:id', authRequired, (req, res) => {
+  const postId = parseInt(req.params.id);
+  const userId = req.session.user.id;
+  const isAdmin = req.session.user.isAdmin;
+  
+  // 게시물 존재 및 권한 확인
+  db.query('SELECT author_id FROM board_community WHERE id = ?', [postId], (err, rows) => {
+    if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
+    
+    if (rows.length === 0) {
+      return res.status(404).json({ error: '게시물을 찾을 수 없습니다.' });
+    }
+    
+    const authorId = rows[0].author_id;
+    
+    // 작성자 본인이거나 관리자만 삭제 가능
+    if (authorId !== userId && !isAdmin) {
+      return res.status(403).json({ error: '이 게시물을 삭제할 권한이 없습니다.' });
+    }
+    
+    // 게시물 삭제
+    db.query('DELETE FROM board_community WHERE id = ?', [postId], (deleteErr, result) => {
+      if (deleteErr) return res.status(500).json({ error: 'DB 오류', detail: deleteErr.message });
+      
+      res.json({ 
+        success: true, 
+        message: '게시물이 삭제되었습니다.'
+      });
+    });
+  });
+});
+
+// QnA 게시글 목록 조회 API (페이지네이션)
+app.get('/api/qna/posts', (req, res) => {
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 30;
+  const offset = (page - 1) * limit;
+
+  // 총 게시글 수 조회
+  db.query('SELECT COUNT(*) as total FROM board_qna', (err, countResult) => {
+    if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
+    
+    const total = countResult[0].total;
+    const totalPages = Math.ceil(total / limit);
+    
+    // 게시글 목록 조회 (작성자 정보 포함)
+    const query = `
+      SELECT b.id, b.title, b.content, b.created_at, b.updated_at, 
+             b.author_id, u.username as author_name
+      FROM board_qna b
+      JOIN users u ON b.author_id = u.id
+      ORDER BY b.created_at DESC
+      LIMIT ? OFFSET ?
+    `;
+    
+    db.query(query, [limit, offset], (err, rows) => {
+      if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
+      
+      res.json({
+        posts: rows,
+        total,
+        totalPages,
+        currentPage: page,
+        hasMore: page < totalPages
+      });
+    });
+  });
+});
+
+// QnA 게시물 개수 조회 API
+app.get('/api/qna/posts/count', (req, res) => {
+  db.query('SELECT COUNT(*) as total FROM board_qna', (err, result) => {
+    if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
+    
+    const total = result[0].total;
+    res.json({ total });
+  });
+});
+
+// QnA 게시물 상세 조회 API
+app.get('/api/qna/posts/:id', (req, res) => {
+  const postId = parseInt(req.params.id);
+  
+  if (isNaN(postId)) {
+    return res.status(400).json({ error: '유효하지 않은 게시물 ID입니다.' });
+  }
+  
+  // 게시물 정보와 작성자 정보를 함께 조회
+  const query = `
+    SELECT b.id, b.title, b.content, b.created_at, b.updated_at, 
+           b.author_id, u.username as author_name
+    FROM board_qna b
+    JOIN users u ON b.author_id = u.id
+    WHERE b.id = ?
+  `;
+  
+  db.query(query, [postId], (err, rows) => {
+    if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
+    
+    if (rows.length === 0) {
+      return res.status(404).json({ error: '게시물을 찾을 수 없습니다.' });
+    }
+    
+    res.json(rows[0]);
+  });
+});
+
+// QnA 게시글 등록 API (관리자만 가능)
+app.post('/api/qna/posts', adminOnly, (req, res) => {
+  const { title, content } = req.body;
+  const authorId = req.session.user.id;
+  
+  // 입력값 검증
+  if (!title || !content) {
+    return res.status(400).json({ error: '제목과 내용을 모두 입력해주세요.' });
+  }
+  
+  if (title.length > 255) {
+    return res.status(400).json({ error: '제목은 255자 이내로 작성해주세요.' });
+  }
+  
+  // 게시글 저장
+  const query = 'INSERT INTO board_qna (author_id, title, content) VALUES (?, ?, ?)';
+  db.query(query, [authorId, title, content], (err, result) => {
+    if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
+    
+    // 생성된 게시글 ID와 함께 성공 응답
+    res.status(201).json({ 
+      success: true, 
+      postId: result.insertId,
+      message: 'QnA 게시글이 등록되었습니다.'
+    });
+  });
+});
+
+// QnA 게시물 수정 API (관리자만 가능)
+app.put('/api/qna/posts/:id', adminOnly, (req, res) => {
+  const postId = parseInt(req.params.id);
+  const { title, content } = req.body;
+  
+  // 입력값 검증
+  if (!title || !content) {
+    return res.status(400).json({ error: '제목과 내용을 모두 입력해주세요.' });
+  }
+  
+  if (title.length > 255) {
+    return res.status(400).json({ error: '제목은 255자 이내로 작성해주세요.' });
+  }
+  
+  // 게시물 존재 확인
+  db.query('SELECT id FROM board_qna WHERE id = ?', [postId], (err, rows) => {
+    if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
+    
+    if (rows.length === 0) {
+      return res.status(404).json({ error: '게시물을 찾을 수 없습니다.' });
+    }
+    
+    // 게시물 수정
+    db.query(
+      'UPDATE board_qna SET title = ?, content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [title, content, postId],
+      (updateErr, result) => {
+        if (updateErr) return res.status(500).json({ error: 'DB 오류', detail: updateErr.message });
+        
+        res.json({ 
+          success: true, 
+          message: 'QnA 게시물이 수정되었습니다.'
+        });
+      }
+    );
+  });
+});
+
+// QnA 게시물 삭제 API (관리자만 가능)
+app.delete('/api/qna/posts/:id', adminOnly, (req, res) => {
+  const postId = parseInt(req.params.id);
+  
+  // 게시물 존재 확인
+  db.query('SELECT id FROM board_qna WHERE id = ?', [postId], (err, rows) => {
+    if (err) return res.status(500).json({ error: 'DB 오류', detail: err.message });
+    
+    if (rows.length === 0) {
+      return res.status(404).json({ error: '게시물을 찾을 수 없습니다.' });
+    }
+    
+    // 게시물 삭제
+    db.query('DELETE FROM board_qna WHERE id = ?', [postId], (deleteErr, result) => {
+      if (deleteErr) return res.status(500).json({ error: 'DB 오류', detail: deleteErr.message });
+      
+      res.json({ 
+        success: true, 
+        message: 'QnA 게시물이 삭제되었습니다.'
+      });
+    });
+  });
+});
+
 // KMBTI 결과 전체 목록 조회
 app.get('/api/admin/kmbti-results', adminOnly, (req, res) => {
   db.query('SELECT * FROM kmbti_results ORDER BY id ASC', (err, rows) => {
